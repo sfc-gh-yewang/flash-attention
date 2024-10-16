@@ -855,9 +855,16 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
     int n_block = n_block_max - 1;
     // We don't need to clear the sK smem tiles since we'll mask out the scores anyway.
-    flash::copy<Is_even_MN, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV,
-                                       binfo.actual_seqlen_k - n_block * kBlockN);
-    cute::cp_async_fence();
+    if (blockIdx.y < gridDim.y - 1 || blockIdx.x < gridDim.x - 1) {
+        flash::copy<Is_even_MN, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV,
+                                           binfo.actual_seqlen_k - n_block * kBlockN);
+        cute::cp_async_fence();
+    } 
+    else {
+        flash::copy2<Is_even_MN, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV,
+                                            binfo.actual_seqlen_k - n_block * kBlockN);
+        cute::cp_async_fence();
+    }
 
     // flash::cp_async_wait<0>();
     // __syncthreads();
