@@ -866,6 +866,8 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         cute::cp_async_fence();
     }
 
+    __syncthreads();
+
     // flash::cp_async_wait<0>();
     // __syncthreads();
     // if (tidx == 0 && blockIdx.y == 0 && blockIdx.z == 0) { print(tKsK); }

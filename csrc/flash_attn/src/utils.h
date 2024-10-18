@@ -424,7 +424,27 @@ __forceinline__ __device__ void copy2(TiledCopy tiled_copy, Tensor<Engine0, Layo
             #pragma unroll
             for (int k = 0; k < size<2>(S); ++k) {
                 if (m == size<1>(S) - 1 && k == size<2>(S) - 1) {
-                    continue;
+                    int jj = 0;
+                    for (; jj < size(S(_, m, k)) - 1; jj++) {
+                        if (Is_even_K || predicate_K(k)) {
+                            D(jj, m, k) = S(jj, m, k);
+                        } else if (Clear_OOB_K) {
+                            D(jj, m, k) = static_cast<typename Engine1::value_type>(0);
+                        }
+                    }
+                    auto ls = S.layout();
+                    auto ld = D.layout();
+                    int s_ptr_offset = ls(jj, m, k);
+                    int d_ptr_offset = ld(jj, m, k);
+                    if (threadIdx.x == 0) {
+                        auto s_raw_ptr = S.data().get() + s_ptr_offset;
+                        auto d_raw_ptr = D.data().get() + d_ptr_offset;
+                        if (Is_even_K || predicate_K(k)) {
+                            *d_raw_ptr = *s_raw_ptr;
+                        } else if (Clear_OOB_K) {
+                            *d_raw_ptr = static_cast<typename Engine1::value_type>(0);
+                        }
+                    }
                 } else if (Is_even_K || predicate_K(k)) {
                     cute::copy(tiled_copy, S(_, m, k), D(_, m, k));
                 } else if (Clear_OOB_K) {
