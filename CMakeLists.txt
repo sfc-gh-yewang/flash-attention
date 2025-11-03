@@ -132,49 +132,49 @@ string(REPLACE "-O2" "-O3" CMAKE_CUDA_FLAGS_RELWITHDEBINFO "${CMAKE_CUDA_FLAGS_R
 # _C extension
 #
 
-if (FA2_ENABLED)
-    file(GLOB FA2_GEN_SRCS "csrc/flash_attn/src/flash_fwd_*.cu")
+# if (FA2_ENABLED)
+#     file(GLOB FA2_GEN_SRCS "csrc/flash_attn/src/flash_fwd_*.cu")
 
-    # For CUDA we set the architectures on a per file basis
-    if (VLLM_GPU_LANG STREQUAL "CUDA")
-        cuda_archs_loose_intersection(FA2_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
-        message(STATUS "FA2_ARCHS: ${FA2_ARCHS}")
+#     # For CUDA we set the architectures on a per file basis
+#     if (VLLM_GPU_LANG STREQUAL "CUDA")
+#         cuda_archs_loose_intersection(FA2_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
+#         message(STATUS "FA2_ARCHS: ${FA2_ARCHS}")
 
-        set_gencode_flags_for_srcs(
-            SRCS "${FA2_GEN_SRCS}"
-            CUDA_ARCHS "${FA2_ARCHS}")
-    endif()
+#         set_gencode_flags_for_srcs(
+#             SRCS "${FA2_GEN_SRCS}"
+#             CUDA_ARCHS "${FA2_ARCHS}")
+#     endif()
 
-    define_gpu_extension_target(
-        _vllm_fa2_C
-        DESTINATION vllm_flash_attn
-        LANGUAGE ${VLLM_GPU_LANG}
-        SOURCES
-            csrc/flash_attn/flash_api.cpp
-            csrc/flash_attn/flash_api_sparse.cpp
-            csrc/flash_attn/flash_api_torch_lib.cpp
-            ${FA2_GEN_SRCS}
-        COMPILE_FLAGS ${VLLM_FA_GPU_FLAGS}
-        USE_SABI 3
-        WITH_SOABI)
+#     define_gpu_extension_target(
+#         _vllm_fa2_C
+#         DESTINATION vllm_flash_attn
+#         LANGUAGE ${VLLM_GPU_LANG}
+#         SOURCES
+#             csrc/flash_attn/flash_api.cpp
+#             csrc/flash_attn/flash_api_sparse.cpp
+#             csrc/flash_attn/flash_api_torch_lib.cpp
+#             ${FA2_GEN_SRCS}
+#         COMPILE_FLAGS ${VLLM_FA_GPU_FLAGS}
+#         USE_SABI 3
+#         WITH_SOABI)
 
-    target_include_directories(_vllm_fa2_C PRIVATE
-        csrc/flash_attn
-        csrc/flash_attn/src
-        csrc/common
-        csrc/cutlass/include)
+#     target_include_directories(_vllm_fa2_C PRIVATE
+#         csrc/flash_attn
+#         csrc/flash_attn/src
+#         csrc/common
+#         csrc/cutlass/include)
 
-    # custom definitions
-    target_compile_definitions(_vllm_fa2_C PRIVATE
-        FLASHATTENTION_DISABLE_BACKWARD
-        FLASHATTENTION_DISABLE_DROPOUT
-        # FLASHATTENTION_DISABLE_ALIBI
-        # FLASHATTENTION_DISABLE_SOFTCAP
-        FLASHATTENTION_DISABLE_UNEVEN_K
-        # FLASHATTENTION_DISABLE_LOCAL
-        FLASHATTENTION_DISABLE_PYBIND
-    )
-endif ()
+#     # custom definitions
+#     target_compile_definitions(_vllm_fa2_C PRIVATE
+#         FLASHATTENTION_DISABLE_BACKWARD
+#         FLASHATTENTION_DISABLE_DROPOUT
+#         # FLASHATTENTION_DISABLE_ALIBI
+#         # FLASHATTENTION_DISABLE_SOFTCAP
+#         FLASHATTENTION_DISABLE_UNEVEN_K
+#         # FLASHATTENTION_DISABLE_LOCAL
+#         FLASHATTENTION_DISABLE_PYBIND
+#     )
+# endif ()
 
 # FA3 requires CUDA 12.0 or later
 if (FA3_ENABLED AND ${CMAKE_CUDA_COMPILER_VERSION} GREATER_EQUAL 12.0)
