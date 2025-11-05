@@ -30,10 +30,15 @@ using namespace cute;
 
 template <int Stages, class ClusterShape_, class TileShape_MNK_, int kHeadDimV, class Element_, class ElementAccum_, class ArchTag_,
         bool Is_causal_, bool Is_local_, bool Has_softcap_, bool Varlen_, bool PagedKVNonTMA_, bool AppendKV_, bool HasQv_,
-        bool MmaPV_is_RS, bool IntraWGOverlap, bool PackGQA_, bool Split_, bool V_colmajor_, class ElementSAux_, int kBlockH_=1>
+        bool MmaPV_is_RS, bool IntraWGOverlap, bool PackGQA_, bool Split_, bool V_colmajor_, class ElementSAux_, int kBlockH_=1, 
+        bool KV_IS_NVFP4_=false>
 struct CollectiveMainloopFwdSm90 {
+    // bugbug
+    static constexpr bool KV_IS_NVFP4 = KV_IS_NVFP4_;
+    static constexpr bool Use_TMA_KV = !KV_IS_NVFP4 && !PagedKVNonTMA_;
 
     static constexpr int kStages = Stages;
+
     using ClusterShape = ClusterShape_;
     using TileShape_MNK = TileShape_MNK_;
     using TileShape_MNK_PV = Shape<decltype(get<0>(TileShape_MNK{})), Int<kHeadDimV>, decltype(get<1>(TileShape_MNK{}))>;

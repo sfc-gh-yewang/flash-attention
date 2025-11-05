@@ -31,29 +31,16 @@ struct Qkv_params {
     // The number of heads.
     int h, h_k;
 
-    uint8_t const* k_fp4_ptr = nullptr;  
-    uint8_t const* v_fp4_ptr = nullptr;    
-    uint8_t const* k_fp4_scale_ptr = nullptr; 
-    uint8_t const* v_fp4_scale_ptr = nullptr;
-
-    int64_t k_fp4_row_stride_bytes = 0;    
-    int64_t k_fp4_head_stride_bytes = 0;  
-    int64_t k_fp4_batch_stride_bytes = 0;
-
-    int64_t v_fp4_row_stride_bytes = 0;
-    int64_t v_fp4_head_stride_bytes = 0;
-    int64_t v_fp4_batch_stride_bytes = 0;
-
-    int64_t k_sf8_row_stride_bytes = 0;  
-    int64_t k_sf8_head_stride_bytes = 0;
-    int64_t k_sf8_batch_stride_bytes = 0;
-
-    int64_t v_sf8_row_stride_bytes = 0;
-    int64_t v_sf8_head_stride_bytes = 0;
-    int64_t v_sf8_batch_stride_bytes = 0;
-
-    // Switch
-    bool kv_is_nvfp4 = false;
+    uint8_t const* k_fp4_ptr; uint8_t const* v_fp4_ptr;
+    uint8_t const* k_fp4_scale_ptr; uint8_t const* v_fp4_scale_ptr;
+    
+    int64_t k_fp4_row_stride_bytes, k_fp4_head_stride_bytes, k_fp4_batch_stride_bytes;
+    int64_t v_fp4_row_stride_bytes, v_fp4_head_stride_bytes, v_fp4_batch_stride_bytes;
+    
+    int64_t k_sf8_row_stride_bytes, k_sf8_head_stride_bytes, k_sf8_batch_stride_bytes;
+    int64_t v_sf8_row_stride_bytes, v_sf8_head_stride_bytes, v_sf8_batch_stride_bytes;
+    
+    bool kv_is_nvfp4;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
