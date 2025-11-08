@@ -37,6 +37,8 @@ struct CollectiveMainloopFwdSm90 {
     // nvfp4
     static constexpr bool KV_IS_NVFP4 = KV_IS_NVFP4_;
     static constexpr bool Use_TMA_KV = !KV_IS_NVFP4 && !PagedKVNonTMA_;
+    static_assert(!(KV_IS_NVFP4 && AppendKV),
+        "AppendKV with NVFP4 is not implemented (no fp16->nvfp4 store path).");
 
     static constexpr int kStages = Stages;
 
@@ -497,6 +499,16 @@ struct CollectiveMainloopFwdSm90 {
         int cp_world_size = 1;
         int cp_rank = 0;
         int const* const cp_tot_seqused_k = nullptr;
+
+        // NVFP4
+        uint8_t const* const ptr_K_fp4 = nullptr;
+        uint8_t const* const ptr_V_fp4 = nullptr;
+        uint8_t const* const ptr_K_sf  = nullptr;
+        uint8_t const* const ptr_V_sf  = nullptr;
+        ShapeSF  const shape_K_sf = {};
+        ShapeSF  const shape_V_sf = {};
+        StrideSF const stride_K_sf = {};
+        StrideSF const stride_V_sf = {};
     };
 
     static Params
@@ -613,7 +625,11 @@ struct CollectiveMainloopFwdSm90 {
                 args.cu_seqlens_q, args.cu_seqlens_k, args.cu_seqlens_k_new,
                 args.seqused_q, args.seqused_k, args.leftpad_k, args.seqlens_rotary,
                 args.ptr_S_aux,
-                args.cp_world_size, args.cp_rank, args.cp_tot_seqused_k};
+                args.cp_world_size, args.cp_rank, args.cp_tot_seqused_k,
+                // ----------------- NVFP4 passthrough -----------------
+                args.ptr_K_fp4, args.ptr_V_fp4, args.ptr_K_sf, args.ptr_V_sf,
+                args.shape_K_sf, args.shape_V_sf, args.stride_K_sf, args.stride_V_sf
+            };
     }
 
     /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
@@ -749,14 +765,55 @@ struct CollectiveMainloopFwdSm90 {
         // This is used to index into the batch dimension of mK and mV
         int const bidb_kv_idx = !is_varlen_k && !params.ptr_pagetable ? bidb_kv : 0;
 
-        using PagedKVManager_t = PagedKVManager<get<1>(TileShape_MNK{}), get<2>(TileShape_MNK{}), get<1>(TileShape_MNK_PV{}), NumProducerThreads, Element, Transpose_V || !IntraWGOverlap /*KV_Same_Iter*/>;
-        PagedKVManager_t paged_kv_manager(
-            params.ptr_pagetable, params.shape_pagetable, params.stride_pagetable,
-            params.ptr_K, params.shape_K, params.stride_K,
-            params.ptr_V, params.headdim_v, params.stride_V,
-            params.page_size_divmod, params.blockN_per_page_size_divmod,
-            bidb_kv, bidh_kv, thread_idx, seqlen_info.seqlen_k - n_offset, seqlen_info.leftpad_k + n_offset, bidb_kv_idx
-        );
+        //NVFP4
+        using PagedKVManager_t = std::conditional_t<
+            KV_IS_NVFP4,
+            PagedKVManagerFP4<
+                get<1>(TileShape_MNK{}) /*kBlockN*/,
+                get<2>(TileShape_MNK{}) /*kHeadDim*/,
+                get<1>(TileShape_MNK_PV{}) /*kHeadDimV*/,
+                NumProducerThreads,
+                Element,
+                Transpose_V || !IntraWGOverlap /* KV_Same_Iter */
+            >,
+            PagedKVManager<
+                get<1>(TileShape_MNK{}) /*kBlockN*/,
+                get<2>(TileShape_MNK{}) /*kHeadDim*/,
+                get<1>(TileShape_MNK_PV{}) /*kHeadDimV*/,
+                NumProducerThreads,
+                Element,
+                Transpose_V || !IntraWGOverlap /* KV_Same_Iter */
+            >
+        >;
+
+        using PagedKV = PagedKVManager_t;
+        PagedKV paged_kv_manager = [&] {
+            if constexpr (KV_IS_NVFP4) {
+                // NVFP4 path: pass FP4 + scales
+                return PagedKV(
+                    params.ptr_pagetable, params.shape_pagetable, params.stride_pagetable,
+                    params.ptr_K_fp4, params.shape_K, params.stride_K,
+                    params.ptr_V_fp4, params.headdim_v, params.stride_V,
+                    params.ptr_K_sf,  params.shape_K_sf, params.stride_K_sf,
+                    params.ptr_V_sf,  params.shape_V_sf, params.stride_V_sf,
+                    params.page_size_divmod, params.blockN_per_page_size_divmod,
+                    bidb_kv, bidh_kv, thread_idx,
+                    seqlen_info.seqlen_k - n_offset, seqlen_info.leftpad_k + n_offset,
+                    bidb_kv_idx
+                );
+            } else {
+                // Normal fp16/bf16 KV cache
+                return PagedKV(
+                    params.ptr_pagetable, params.shape_pagetable, params.stride_pagetable,
+                    params.ptr_K, params.shape_K, params.stride_K,
+                    params.ptr_V, params.headdim_v, params.stride_V,
+                    params.page_size_divmod, params.blockN_per_page_size_divmod,
+                    bidb_kv, bidh_kv, thread_idx,
+                    seqlen_info.seqlen_k - n_offset, seqlen_info.leftpad_k + n_offset,
+                    bidb_kv_idx
+                );
+            }
+        }();
 
         // Set up for transposing V, only used if Transpose_V
         S2RTiledCopyVt s2r_tiled_copy_vt;
