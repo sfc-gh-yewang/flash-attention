@@ -20,6 +20,7 @@
 #include "mask.h"
 #include "pack_gqa.h"
 #include "paged_kv.h"
+#include "paged_kv_nvfp4.h"
 #include "rotary.h"
 #include "utils.h"
 #include "sm90_pipeline_no_cluster.hpp"
@@ -33,7 +34,7 @@ template <int Stages, class ClusterShape_, class TileShape_MNK_, int kHeadDimV, 
         bool MmaPV_is_RS, bool IntraWGOverlap, bool PackGQA_, bool Split_, bool V_colmajor_, class ElementSAux_, int kBlockH_=1, 
         bool KV_IS_NVFP4_=false>
 struct CollectiveMainloopFwdSm90 {
-    // bugbug
+    // nvfp4
     static constexpr bool KV_IS_NVFP4 = KV_IS_NVFP4_;
     static constexpr bool Use_TMA_KV = !KV_IS_NVFP4 && !PagedKVNonTMA_;
 
@@ -247,6 +248,11 @@ struct CollectiveMainloopFwdSm90 {
     using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t, int32_t>;  // (seqlen, d, head, batch)
     using StrideQK = cute::Stride<int64_t, _1, int64_t, int64_t>;
     using StrideV = std::conditional_t<!V_colmajor, StrideQK, cute::Stride<_1, int64_t, int64_t, int64_t>>;
+
+    // NVFP4 scale tensor: (seqlen, rounded_n_bytes, head, batch)
+    using ShapeSF   = cute::Shape<int32_t, int32_t, int32_t, int32_t>;
+    using StrideSF  = cute::Stride<int64_t, _1, int64_t, int64_t>;
+
     // ((qhead_per_khead, seqlen_q), d, nheads_kv, batch, num_splits)
     // using ShapeQPacked = std::conditional_t<!PackGQA, ShapeQKV, cute::Shape<cute::Shape<int32_t, int32_t>, int32_t, int32_t, int32_t>>;
     using ShapeQPackedTMA = std::conditional_t<!PackGQA, ShapeQKV, cute::Shape<cute::Shape<Int<kBlockH>, int32_t>, int32_t, int32_t, int32_t>>;
@@ -421,6 +427,16 @@ struct CollectiveMainloopFwdSm90 {
         int const cp_world_size = 1;
         int const cp_rank = 0;
         int const* const cp_tot_seqused_k = nullptr;
+
+        // ----------------- NVFP4 (optional) -----------------
+        uint8_t const* const ptr_K_fp4 = nullptr;
+        uint8_t const* const ptr_V_fp4 = nullptr;
+        uint8_t const* const ptr_K_sf  = nullptr;
+        uint8_t const* const ptr_V_sf  = nullptr;
+        ShapeSF  const shape_K_sf = {};
+        ShapeSF  const shape_V_sf = {};
+        StrideSF const stride_K_sf = {};
+        StrideSF const stride_V_sf = {};
     };
 
     // Device side kernel params
