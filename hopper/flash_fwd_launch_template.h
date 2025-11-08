@@ -271,7 +271,7 @@ void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream) {
                             // Only use Cluster if number of tiles along seqlen_q is even and not varlen
                             CLUSTER_SWITCH(cutlass::ceil_div(params.seqlen_q * (!PackGQA ? 1 : params.h / params.h_k), kBlockM) % 2 == 0, Use_cluster, [&] {
                                 // NVFP4
-                                static constexpr int ClusterM = (Enable_cluster_base && !KV_IS_NVFP4 && Use_cluster) ? 2 : 1;
+                                static constexpr int ClusterM = (Enable_cluster && !KV_IS_NVFP4 && Use_cluster) ? 2 : 1;
                                 int const qhead_per_khead = !PackGQA ? 1 : cutlass::ceil_div(params.h, params.h_k);
                                 PACK_GQA_BLOCK_SWITCH(qhead_per_khead, kBlockH_, [&] {
                                     // TODO: look at pack gqa tma for hdim diff
