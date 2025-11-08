@@ -175,8 +175,8 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         // nvfp4
         KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.k_fp4_ptr) : nullptr,
         KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.v_fp4_ptr) : nullptr,
-        KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.k_scale_ptr) : nullptr,
-        KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.v_scale_ptr) : nullptr,
+        KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.k_fp4_scale_ptr) : nullptr,
+        KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.v_fp4_scale_ptr) : nullptr,
         KV_IS_NVFP4 ? shape_K_sf : typename CollectiveMainloop::ShapeSF{},
         KV_IS_NVFP4 ? shape_V_sf : typename CollectiveMainloop::ShapeSF{},
         KV_IS_NVFP4 ? stride_K_sf : typename CollectiveMainloop::StrideSF{},
