@@ -34,12 +34,6 @@ struct Qkv_params {
     uint8_t const* k_fp4_ptr; uint8_t const* v_fp4_ptr;
     uint8_t const* k_fp4_scale_ptr; uint8_t const* v_fp4_scale_ptr;
     
-    int64_t k_fp4_row_stride_bytes, k_fp4_head_stride_bytes, k_fp4_batch_stride_bytes;
-    int64_t v_fp4_row_stride_bytes, v_fp4_head_stride_bytes, v_fp4_batch_stride_bytes;
-    
-    int64_t k_sf8_row_stride_bytes, k_sf8_head_stride_bytes, k_sf8_batch_stride_bytes;
-    int64_t v_sf8_row_stride_bytes, v_sf8_head_stride_bytes, v_sf8_batch_stride_bytes;
-    
     bool kv_is_nvfp4;
 };
 
