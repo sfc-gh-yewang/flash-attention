@@ -46,6 +46,15 @@ public:
     static constexpr bool Use_TMA_KV = CollectiveMainloop::Use_TMA_KV;
     static constexpr bool Use_TMA_O = CollectiveEpilogue::Use_TMA_O;
     static constexpr bool PackGQA = CollectiveMainloop::PackGQA;
+    // NVFP4
+    static constexpr bool KV_IS_NVFP4 = CollectiveMainloop::KV_IS_NVFP4;
+    static_assert(!KV_IS_NVFP4 || !Use_TMA_KV,
+                  "NVFP4 path must use the non-TMA producer (Use_TMA_KV == false).");
+    static_assert(!(KV_IS_NVFP4 && AppendKV),
+                  "AppendKV with NVFP4 is not implemented (no fp16/bf16->nvfp4 store).");
+    static_assert(!KV_IS_NVFP4 || CUTE_STATIC_V(size(ClusterShape{})) == 1,
+                  "NVFP4 non-TMA path requires ClusterShape == 1.");
+
     static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
     static constexpr bool SameHeadDim = CollectiveMainloop::SameHeadDim;
     static constexpr bool LargeHeadDimV = CollectiveMainloop::LargeHeadDimV;
@@ -81,7 +90,13 @@ public:
 
     /// Register requirement for Load and Math WGs
     // If we use cp.async to load K and V, we need more registers for the producer WG.
-    static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 24 : 40) : 32);
+    // NVFP4: Producer WG registers: give a tiny headroom for NVFP4 convert when non-TMA
+    static constexpr uint32_t LoadRegisterRequirement =
+        (NumMmaWarpGroups == 1)
+            ? 56
+            : (NumMmaWarpGroups == 2
+                ? (Use_TMA_KV ? 24 : (KV_IS_NVFP4 ? 44 : 40))
+                : 32);
     static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 240 : 232) : 160);
     // If you want to print from the producer warp, you'd need to increase the number of registers
     // Otherwise you'll get CUDA error.

@@ -27,7 +27,7 @@ using namespace cute;
 
 template <int Arch, int kHeadDim, int kHeadDimV, int ClusterM, typename Element, typename ElementOut,
           bool Is_causal, bool Is_local, bool Has_softcap, bool Varlen, bool PagedKVNonTMA, bool AppendKV, bool HasQv,
-          bool PackGQA, bool Split, bool V_colmajor, bool Use_one_mma_wg, int kBlockH=1>
+          bool PackGQA, bool Split, bool V_colmajor, bool Use_one_mma_wg, int kBlockH=1, bool KV_IS_NVFP4=false>
 void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     static_assert(!(Is_causal && Is_local), "Causal and Local cannot be enabled at the same time");
     static_assert(!(AppendKV && V_colmajor), "AppendKV and V_colmajor cannot be enabled at the same time");
@@ -51,8 +51,8 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
     using TileShape_MNK_PV = cute::Shape<Int<kBlockM>, Int<kHeadDimV>, Int<kBlockN>>;
     using ClusterShape = cute::Shape<Int<ClusterM>, _1, _1>;
-    // bugbug
-    constexpr bool KV_IS_NVFP4 = true;
+
+    // nvfp4
     using CollectiveMainloop = std::conditional_t<
         Arch >= 90,
         flash::CollectiveMainloopFwdSm90<kStages, ClusterShape, TileShape_MNK, kHeadDimV, Element, float, cutlass::arch::Sm90, Is_causal, Is_local, Has_softcap, Varlen, PagedKVNonTMA, AppendKV, HasQv, MmaPV_is_RS, IntraWGOverlap, PackGQA, Split, V_colmajor, ElementS, kBlockH, KV_IS_NVFP4>,
@@ -91,6 +91,45 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         cute::conditional_return<!V_colmajor>(
             make_stride(params.v_row_stride, _1{}, params.v_head_stride, !is_varlen_k ? params.v_batch_stride : 0),
             make_stride(_1{}, params.v_dim_stride, params.v_head_stride, !is_varlen_k ? params.v_batch_stride : 0));
+
+    // nvfp4
+    typename CollectiveMainloop::ShapeSF shape_K_sf{};
+    typename CollectiveMainloop::ShapeSF shape_V_sf{};
+    typename CollectiveMainloop::StrideSF stride_K_sf{};
+    typename CollectiveMainloop::StrideSF stride_V_sf{};
+
+    if constexpr (KV_IS_NVFP4) {
+        // Effective seqlen for a single “page” when paged; otherwise the full seqlen
+        int seqlen_k_eff = !params.page_table ? (!is_varlen_k ? params.seqlen_k : params.total_k) : params.page_size;
+        int batch_k_eff  = !params.page_table ? batch_k : params.num_pages;
+
+        // Round the number of per-16-element scales to a multiple of 4 bytes (padding)
+        int scale_n_k = (params.d  + 15) / 16;
+        int scale_n_v = (params.dv + 15) / 16;
+        int rounded_n_bytes_k = ((scale_n_k + 3) / 4) * 4;
+        int rounded_n_bytes_v = ((scale_n_v + 3) / 4) * 4;
+
+        // Shape: (seqlen, rounded_n_bytes, head, batch)
+        shape_K_sf = { seqlen_k_eff, rounded_n_bytes_k, params.h_k, batch_k_eff };
+        shape_V_sf = { seqlen_k_eff, rounded_n_bytes_v, params.h_k, batch_k_eff };
+
+        // Row-major layout where:
+        //  - stride over 'rounded_n_bytes' is 1 (encoded by _1{})
+        //  - stride over 'seqlen' is rounded_n_bytes
+        //  - stride over 'head' is seqlen * rounded_n_bytes
+        //  - stride over 'batch' is head * seqlen * rounded_n_bytes
+        int64_t k_step_seqlen = rounded_n_bytes_k;
+        int64_t k_step_head   = int64_t(seqlen_k_eff) * rounded_n_bytes_k;
+        int64_t k_step_batch  = int64_t(params.h_k)    * k_step_head;
+
+        int64_t v_step_seqlen = rounded_n_bytes_v;
+        int64_t v_step_head   = int64_t(seqlen_k_eff) * rounded_n_bytes_v;
+        int64_t v_step_batch  = int64_t(params.h_k)    * v_step_head;
+
+        stride_K_sf = { k_step_seqlen, _1{}, k_step_head, k_step_batch };
+        stride_V_sf = { v_step_seqlen, _1{}, v_step_head, v_step_batch };
+    }
+
     typename CollectiveMainloop::Arguments mainloop_args {
         static_cast<Element const*>(params.q_ptr),
         {seqlen_q, params.d, params.h, batch_q},  // shape_Q
@@ -132,7 +171,16 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         params.seqused_q, params.seqused_k,
         params.leftpad_k, params.seqlens_rotary,
         static_cast<ElementS const*>(params.s_aux_ptr),
-        params.cp_world_size, params.cp_rank, params.cp_tot_seqused_k
+        params.cp_world_size, params.cp_rank, params.cp_tot_seqused_k,
+        // nvfp4
+        KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.k_fp4_ptr) : nullptr,
+        KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.v_fp4_ptr) : nullptr,
+        KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.k_scale_ptr) : nullptr,
+        KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.v_scale_ptr) : nullptr,
+        KV_IS_NVFP4 ? shape_K_sf : typename CollectiveMainloop::ShapeSF{},
+        KV_IS_NVFP4 ? shape_V_sf : typename CollectiveMainloop::ShapeSF{},
+        KV_IS_NVFP4 ? stride_K_sf : typename CollectiveMainloop::StrideSF{},
+        KV_IS_NVFP4 ? stride_V_sf : typename CollectiveMainloop::StrideSF{}
     };
     typename CollectiveEpilogue::Arguments epilogue_args {
         static_cast<ElementOut*>(params.o_ptr),
@@ -227,7 +275,14 @@ void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream) {
                                 PACK_GQA_BLOCK_SWITCH(qhead_per_khead, kBlockH_, [&] {
                                     // TODO: look at pack gqa tma for hdim diff
                                     static constexpr int kBlockH = !PackGQA || Arch < 90 || (kHeadDim != kHeadDimV) ? 1 : kBlockH_;
-                                    run_flash_fwd<Arch, kHeadDim, kHeadDimV, ClusterM, T, T_out, Is_causal, Is_local, Has_softcap, Varlen, PagedKVNonTMA, AppendKV && Varlen, HasQv, PackGQA, Split, V_colmajor, Use_one_mma_wg, kBlockH>(params, stream);
+                                    BOOL_SWITCH(params.kv_is_nvfp4, KV_IS_NVFP4, [&] {
+                                        run_flash_fwd<
+                                            Arch, kHeadDim, kHeadDimV, ClusterM, T, T_out,
+                                            Is_causal, Is_local, Has_softcap, Varlen,
+                                            PagedKVNonTMA, (AppendKV && Varlen), HasQv,
+                                            PackGQA, Split, V_colmajor, Use_one_mma_wg, kBlockH, KV_IS_NVFP4
+                                        >(params, stream);
+                                    });
                                 });
                             });
                         });
