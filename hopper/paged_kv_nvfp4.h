@@ -35,7 +35,7 @@ namespace flash {
 using namespace cute;
 
 // -------- FP4 helper (reuse the same LUT contract as nvfp4_to_fp16.cuh) -----
-__constant__ float custom_fp4_lut[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+__device__ __constant__ float custom_fp4_lut[8];
 
 // Convert a single 4-bit value (bit3=sign, bit[2:0]=magnitude-index) to float.
 // We use the LUT for magnitude and OR-in the sign bit.
@@ -214,8 +214,18 @@ struct PagedKVManagerFP4 {
         // K/V NVFP4 bytes (second dimension is bytes: d_bytes = d/2)
         auto shape_K_bytes = make_shape(get<0>(shape_K), get<1>(shape_K) / 2, get<2>(shape_K), get<3>(shape_K));
         auto shape_V_bytes = make_shape(get<0>(shape_K), headdim_v / 2,       get<2>(shape_K), get<3>(shape_K));
-        mK_paged4 = make_tensor(make_gmem_ptr(ptr_K_fp4), shape_K_bytes, stride_K)(_, _, bidh, _);
-        mV_paged4 = make_tensor(make_gmem_ptr(ptr_V_fp4), shape_V_bytes, stride_V)(_, _, bidh, _);
+
+        auto mk_stride_bytes = [](auto sh) {
+          int64_t dbytes          = get<1>(sh);                           // bytes per row
+          int64_t stride_seqlen   = dbytes;                               // step 1 row
+          int64_t stride_head     = int64_t(get<0>(sh)) * dbytes;         // seqlen * dbytes
+          int64_t stride_batch    = int64_t(get<2>(sh)) * stride_head;    // head * seqlen * dbytes
+          return make_stride(stride_seqlen, _1{}, stride_head, stride_batch);
+        };
+        auto stride_K_bytes = mk_stride_bytes(shape_K_bytes);
+        auto stride_V_bytes = mk_stride_bytes(shape_V_bytes);
+        mK_paged4 = make_tensor(make_gmem_ptr(ptr_K_fp4), shape_K_bytes, stride_K_bytes)(_, _, bidh, _);
+        mV_paged4 = make_tensor(make_gmem_ptr(ptr_V_fp4), shape_V_bytes, stride_V_bytes)(_, _, bidh, _);
 
         // Per-16-element scales (bytes), already padded per row to multiple of 4
         mK_sf = make_tensor(make_gmem_ptr(ptr_K_sf), shape_K_sf, stride_K_sf)(_, _, bidh, _);
