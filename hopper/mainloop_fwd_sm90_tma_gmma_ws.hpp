@@ -37,7 +37,7 @@ struct CollectiveMainloopFwdSm90 {
     // nvfp4
     static constexpr bool KV_IS_NVFP4 = KV_IS_NVFP4_;
     static constexpr bool Use_TMA_KV = !KV_IS_NVFP4 && !PagedKVNonTMA_;
-    static_assert(!(KV_IS_NVFP4 && AppendKV),
+    static_assert(!(KV_IS_NVFP4 && AppendKV_),
         "AppendKV with NVFP4 is not implemented (no fp16->nvfp4 store path).");
 
     static constexpr int kStages = Stages;
@@ -64,7 +64,6 @@ struct CollectiveMainloopFwdSm90 {
     static constexpr bool V_colmajor = V_colmajor_;
     static constexpr bool Transpose_V = Is_FP8 && !V_colmajor;
     static constexpr bool Use_TMA_Q = !PackGQA || PackGQA_TMA;
-    static constexpr bool Use_TMA_KV = !PagedKVNonTMA;
     static_assert(Use_TMA_KV || CUTE_STATIC_V(size(ClusterShape{})) == 1, "If not using TMA for KV, ClusterShape must be 1");
     static_assert(Use_TMA_KV || !V_colmajor, "If not using TMA for KV, V_colmajor is not supported");
     static constexpr bool SameHeadDim = get<2>(TileShape_MNK{}) == kHeadDimV;
@@ -864,7 +863,7 @@ struct CollectiveMainloopFwdSm90 {
 
         auto load_K = [&] (int const n_block, auto const& smem_pipe_write, auto need_seqlenk_masking_type) {
             pipeline_k.producer_acquire(smem_pipe_write);
-            if constexpr (!PagedKVNonTMA) {
+            if constexpr (Use_TMA_KV) {
                 auto [n_block_idx, bidb_kv_idx] = paged_kv_manager.get_indices_for_K_TMA();
                 copy(params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
                     tKgK_TMA(_, n_block_idx, bidb_kv_idx), tKsK_TMA(_, smem_pipe_write.index()));
@@ -878,7 +877,7 @@ struct CollectiveMainloopFwdSm90 {
         auto load_V = [&] (int const n_block, auto const& smem_pipe_write, auto need_seqlenk_masking_type) {
             auto pipeline_v_load = cute::conditional_return<!Transpose_V>(pipeline_v, pipeline_vt);
             pipeline_v_load.producer_acquire(smem_pipe_write);
-            if constexpr (!PagedKVNonTMA) {
+            if constexpr (Use_TMA_KV) {
                 auto [n_block_idx, bidb_kv_idx] = paged_kv_manager.get_indices_for_V_TMA();
                 copy(params.tma_load_V.with(*pipeline_v_load.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
                     tVgVt_TMA(_, n_block_idx, bidb_kv_idx), tVsVt_TMA(_, smem_pipe_write.index()));
@@ -914,7 +913,7 @@ struct CollectiveMainloopFwdSm90 {
         bool should_load_KV = !Use_TMA_KV || ((SingleProducerWarp || warp_idx_in_warpgroup == 0) && cute::elect_one_sync());
 
         if (should_load_KV) {
-            if constexpr (PagedKVNonTMA) {
+            if constexpr (!Use_TMA_KV) {
                 paged_kv_manager.template load_page_table<true /*Seqlenk_mask*/, true /*First_iter*/>(n_block);
             } else {
                 paged_kv_manager.template load_page_table_TMA<true /*First_iter*/>(n_block);
@@ -978,7 +977,7 @@ struct CollectiveMainloopFwdSm90 {
             PipelineState smem_pipe_write_v = smem_pipe_write; // copy the state, write_v is always 1 step behind
             ++smem_pipe_write;
             if (should_load_KV) {
-                if constexpr (PagedKVNonTMA) {
+                if constexpr (!Use_TMA_KV) {
                     paged_kv_manager.template load_page_table<false /*Seqlenk_mask*/>(n_block);
                 } else {
                     paged_kv_manager.load_page_table_TMA(n_block);

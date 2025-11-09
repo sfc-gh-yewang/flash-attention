@@ -92,32 +92,24 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
             make_stride(params.v_row_stride, _1{}, params.v_head_stride, !is_varlen_k ? params.v_batch_stride : 0),
             make_stride(_1{}, params.v_dim_stride, params.v_head_stride, !is_varlen_k ? params.v_batch_stride : 0));
 
-    // nvfp4
-    typename CollectiveMainloop::ShapeSF shape_K_sf{};
-    typename CollectiveMainloop::ShapeSF shape_V_sf{};
-    typename CollectiveMainloop::StrideSF stride_K_sf{};
-    typename CollectiveMainloop::StrideSF stride_V_sf{};
+    // Build mainloop args without default-constructing (Arguments has const members).
+    auto mainloop_args = [&] {
+      if constexpr (KV_IS_NVFP4) {
+        // Compute NVFP4 shapes/strides only in this branch
+        int seqlen_k_eff = !params.page_table
+                           ? (!is_varlen_k ? params.seqlen_k : params.total_k)
+                           : params.page_size;
+        int batch_k_eff  = !params.page_table ? (!is_varlen_k ? (params.kv_batch_idx ? params.b_k : params.b) : 1)
+                                              : params.num_pages;
 
-    if constexpr (KV_IS_NVFP4) {
-        // Effective seqlen for a single “page” when paged; otherwise the full seqlen
-        int seqlen_k_eff = !params.page_table ? (!is_varlen_k ? params.seqlen_k : params.total_k) : params.page_size;
-        int batch_k_eff  = !params.page_table ? batch_k : params.num_pages;
-
-        // Round the number of per-16-element scales to a multiple of 4 bytes (padding)
         int scale_n_k = (params.d  + 15) / 16;
         int scale_n_v = (params.dv + 15) / 16;
         int rounded_n_bytes_k = ((scale_n_k + 3) / 4) * 4;
         int rounded_n_bytes_v = ((scale_n_v + 3) / 4) * 4;
 
-        // Shape: (seqlen, rounded_n_bytes, head, batch)
-        shape_K_sf = { seqlen_k_eff, rounded_n_bytes_k, params.h_k, batch_k_eff };
-        shape_V_sf = { seqlen_k_eff, rounded_n_bytes_v, params.h_k, batch_k_eff };
+        typename CollectiveMainloop::ShapeSF shape_K_sf{ seqlen_k_eff, rounded_n_bytes_k, params.h_k, batch_k_eff };
+        typename CollectiveMainloop::ShapeSF shape_V_sf{ seqlen_k_eff, rounded_n_bytes_v, params.h_k, batch_k_eff };
 
-        // Row-major layout where:
-        //  - stride over 'rounded_n_bytes' is 1 (encoded by _1{})
-        //  - stride over 'seqlen' is rounded_n_bytes
-        //  - stride over 'head' is seqlen * rounded_n_bytes
-        //  - stride over 'batch' is head * seqlen * rounded_n_bytes
         int64_t k_step_seqlen = rounded_n_bytes_k;
         int64_t k_step_head   = int64_t(seqlen_k_eff) * rounded_n_bytes_k;
         int64_t k_step_batch  = int64_t(params.h_k)    * k_step_head;
@@ -126,62 +118,127 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         int64_t v_step_head   = int64_t(seqlen_k_eff) * rounded_n_bytes_v;
         int64_t v_step_batch  = int64_t(params.h_k)    * v_step_head;
 
-        stride_K_sf = { k_step_seqlen, _1{}, k_step_head, k_step_batch };
-        stride_V_sf = { v_step_seqlen, _1{}, v_step_head, v_step_batch };
-    }
+        typename CollectiveMainloop::StrideSF stride_K_sf{ k_step_seqlen, _1{}, k_step_head, k_step_batch };
+        typename CollectiveMainloop::StrideSF stride_V_sf{ v_step_seqlen, _1{}, v_step_head, v_step_batch };
 
-    typename CollectiveMainloop::Arguments mainloop_args {
-        static_cast<Element const*>(params.q_ptr),
-        {seqlen_q, params.d, params.h, batch_q},  // shape_Q
-        {params.q_row_stride, _1{}, params.q_head_stride, !is_varlen_q ? params.q_batch_stride : 0},  // stride_Q
-        static_cast<Element*>(params.k_ptr),
-        {!params.page_table ? (!is_varlen_k ? params.seqlen_k : params.total_k) : params.page_size,
-         params.d, params.h_k, !params.page_table ? batch_k : params.num_pages},  // shape_K
-        {params.k_row_stride, _1{}, params.k_head_stride, !is_varlen_k ? params.k_batch_stride : 0},  // stride_K
-        static_cast<Element*>(params.v_ptr),
-        params.dv,  // headdim_v
-        v_strides,  // stride_V
-        static_cast<Element const*>(params.knew_ptr),
-        {!is_varlen_k_new ? params.seqlen_knew : params.total_knew, params.d, params.h_k, !is_varlen_k_new ? params.b : 1},  // shape_K_new
-        {params.knew_row_stride, _1{}, params.knew_head_stride, !is_varlen_k_new ? params.knew_batch_stride : 0},  // stride_K_new
-        static_cast<Element const*>(params.vnew_ptr),
-        {params.vnew_row_stride, _1{}, params.vnew_head_stride, !is_varlen_k_new ? params.vnew_batch_stride : 0}, // stride_V_new
-        static_cast<Element const*>(params.qv_ptr),
-        {params.qv_row_stride, _1{}, params.qv_head_stride, !is_varlen_q ? params.qv_batch_stride : 0},  // stride_Qv
-        static_cast<Element const*>(params.rotary_cos_ptr),
-        {params.seqlen_k, params.rotary_dim / 2},  // shape_rotary, the seqlen shape doesn't matter
-        {params.rotary_dim / 2, _1{}},  // stride_rotary_cos
-        static_cast<Element const*>(params.rotary_sin_ptr),
-        {params.rotary_dim / 2, _1{}},  // stride_rotary_sin
-        params.is_rotary_interleaved,
-        params.page_table,
-        // if page_size is not set, avoid dividing by zero
-        {params.kv_batch_idx ? params.b_k : params.b, !params.page_table ? 0 : params.seqlen_k / params.page_size}, // shape_page_table
-        {params.page_table_batch_stride, _1{}},  // stride_page_table
-        params.scale_softmax,
-        params.q_descale_ptr, params.k_descale_ptr, params.v_descale_ptr,
-        {params.q_descale_batch_stride, params.q_descale_head_stride},
-        {params.k_descale_batch_stride, params.k_descale_head_stride},
-        {params.v_descale_batch_stride, params.v_descale_head_stride},
-        params.window_size_left, params.window_size_right,
-        params.softcap,
-        params.num_splits,
-        params.kv_batch_idx,
-        params.cu_seqlens_q, params.cu_seqlens_k, params.cu_seqlens_knew,
-        params.seqused_q, params.seqused_k,
-        params.leftpad_k, params.seqlens_rotary,
-        static_cast<ElementS const*>(params.s_aux_ptr),
-        params.cp_world_size, params.cp_rank, params.cp_tot_seqused_k,
-        // nvfp4
-        KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.k_fp4_ptr) : nullptr,
-        KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.v_fp4_ptr) : nullptr,
-        KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.k_fp4_scale_ptr) : nullptr,
-        KV_IS_NVFP4 ? static_cast<uint8_t const*>(params.v_fp4_scale_ptr) : nullptr,
-        KV_IS_NVFP4 ? shape_K_sf : typename CollectiveMainloop::ShapeSF{},
-        KV_IS_NVFP4 ? shape_V_sf : typename CollectiveMainloop::ShapeSF{},
-        KV_IS_NVFP4 ? stride_K_sf : typename CollectiveMainloop::StrideSF{},
-        KV_IS_NVFP4 ? stride_V_sf : typename CollectiveMainloop::StrideSF{}
-    };
+        return typename CollectiveMainloop::Arguments{
+            static_cast<Element const*>(params.q_ptr),
+            {seqlen_q, params.d, params.h, batch_q},
+            {params.q_row_stride, _1{}, params.q_head_stride, !is_varlen_q ? params.q_batch_stride : 0},
+
+            static_cast<Element*>(params.k_ptr),
+            {!params.page_table ? (!is_varlen_k ? params.seqlen_k : params.total_k) : params.page_size,
+             params.d, params.h_k, !params.page_table ? (!is_varlen_k ? (params.kv_batch_idx ? params.b_k : params.b) : 1) : params.num_pages},
+            {params.k_row_stride, _1{}, params.k_head_stride, !is_varlen_k ? params.k_batch_stride : 0},
+
+            static_cast<Element*>(params.v_ptr),
+            params.dv,
+            v_strides,
+
+            static_cast<Element const*>(params.knew_ptr),
+            {!is_varlen_k_new ? params.seqlen_knew : params.total_knew, params.d, params.h_k, !is_varlen_k_new ? params.b : 1},
+            {params.knew_row_stride, _1{}, params.knew_head_stride, !is_varlen_k_new ? params.knew_batch_stride : 0},
+
+            static_cast<Element const*>(params.vnew_ptr),
+            {params.vnew_row_stride, _1{}, params.vnew_head_stride, !is_varlen_k_new ? params.vnew_batch_stride : 0},
+
+            static_cast<Element const*>(params.qv_ptr),
+            {params.qv_row_stride, _1{}, params.qv_head_stride, !is_varlen_q ? params.qv_batch_stride : 0},
+
+            static_cast<Element const*>(params.rotary_cos_ptr),
+            {params.seqlen_k, params.rotary_dim / 2},
+            {params.rotary_dim / 2, _1{}},
+            static_cast<Element const*>(params.rotary_sin_ptr),
+            {params.rotary_dim / 2, _1{}},
+            params.is_rotary_interleaved,
+
+            params.page_table,
+            {params.kv_batch_idx ? params.b_k : params.b, !params.page_table ? 0 : params.seqlen_k / params.page_size},
+            {params.page_table_batch_stride, _1{}},
+
+            params.scale_softmax,
+            params.q_descale_ptr, params.k_descale_ptr, params.v_descale_ptr,
+            {params.q_descale_batch_stride, params.q_descale_head_stride},
+            {params.k_descale_batch_stride, params.k_descale_head_stride},
+            {params.v_descale_batch_stride, params.v_descale_head_stride},
+
+            params.window_size_left, params.window_size_right,
+            params.softcap,
+            params.num_splits,
+            params.kv_batch_idx,
+
+            params.cu_seqlens_q, params.cu_seqlens_k, params.cu_seqlens_knew,
+            params.seqused_q, params.seqused_k,
+            params.leftpad_k, params.seqlens_rotary,
+
+            static_cast<ElementS const*>(params.s_aux_ptr),
+            params.cp_world_size, params.cp_rank, params.cp_tot_seqused_k,
+
+            // NVFP4 extras (only in this branch)
+            static_cast<uint8_t const*>(params.k_fp4_ptr),
+            static_cast<uint8_t const*>(params.v_fp4_ptr),
+            static_cast<uint8_t const*>(params.k_fp4_scale_ptr),
+            static_cast<uint8_t const*>(params.v_fp4_scale_ptr),
+            shape_K_sf, shape_V_sf, stride_K_sf, stride_V_sf
+        };
+    } else {
+        // Non-NVFP4: same fields as before NVFP4 feature; do NOT include SF-specific args.
+        return typename CollectiveMainloop::Arguments{
+            static_cast<Element const*>(params.q_ptr),
+            {seqlen_q, params.d, params.h, batch_q},
+            {params.q_row_stride, _1{}, params.q_head_stride, !is_varlen_q ? params.q_batch_stride : 0},
+
+            static_cast<Element*>(params.k_ptr),
+            {!params.page_table ? (!is_varlen_k ? params.seqlen_k : params.total_k) : params.page_size,
+             params.d, params.h_k, !params.page_table ? (!is_varlen_k ? (params.kv_batch_idx ? params.b_k : params.b) : 1) : params.num_pages},
+            {params.k_row_stride, _1{}, params.k_head_stride, !is_varlen_k ? params.k_batch_stride : 0},
+
+            static_cast<Element*>(params.v_ptr),
+            params.dv,
+            v_strides,
+
+            static_cast<Element const*>(params.knew_ptr),
+            {!is_varlen_k_new ? params.seqlen_knew : params.total_knew, params.d, params.h_k, !is_varlen_k_new ? params.b : 1},
+            {params.knew_row_stride, _1{}, params.knew_head_stride, !is_varlen_k_new ? params.knew_batch_stride : 0},
+
+            static_cast<Element const*>(params.vnew_ptr),
+            {params.vnew_row_stride, _1{}, params.vnew_head_stride, !is_varlen_k_new ? params.vnew_batch_stride : 0},
+
+            static_cast<Element const*>(params.qv_ptr),
+            {params.qv_row_stride, _1{}, params.qv_head_stride, !is_varlen_q ? params.qv_batch_stride : 0},
+
+            static_cast<Element const*>(params.rotary_cos_ptr),
+            {params.seqlen_k, params.rotary_dim / 2},
+            {params.rotary_dim / 2, _1{}},
+            static_cast<Element const*>(params.rotary_sin_ptr),
+            {params.rotary_dim / 2, _1{}},
+            params.is_rotary_interleaved,
+
+            params.page_table,
+            {params.kv_batch_idx ? params.b_k : params.b, !params.page_table ? 0 : params.seqlen_k / params.page_size},
+            {params.page_table_batch_stride, _1{}},
+
+            params.scale_softmax,
+            params.q_descale_ptr, params.k_descale_ptr, params.v_descale_ptr,
+            {params.q_descale_batch_stride, params.q_descale_head_stride},
+            {params.k_descale_batch_stride, params.k_descale_head_stride},
+            {params.v_descale_batch_stride, params.v_descale_head_stride},
+
+            params.window_size_left, params.window_size_right,
+            params.softcap,
+            params.num_splits,
+            params.kv_batch_idx,
+
+            params.cu_seqlens_q, params.cu_seqlens_k, params.cu_seqlens_knew,
+            params.seqused_q, params.seqused_k,
+            params.leftpad_k, params.seqlens_rotary,
+
+            static_cast<ElementS const*>(params.s_aux_ptr),
+            params.cp_world_size, params.cp_rank, params.cp_tot_seqused_k
+        };
+      }
+    }();
+
     typename CollectiveEpilogue::Arguments epilogue_args {
         static_cast<ElementOut*>(params.o_ptr),
         {seqlen_q, params.dv, params.h, batch_q, params.num_splits},  // shape_O
@@ -270,20 +327,31 @@ void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream) {
                         APPENDKV_SWITCH(params.knew_ptr, AppendKV, [&] {
                             // Only use Cluster if number of tiles along seqlen_q is even and not varlen
                             CLUSTER_SWITCH(cutlass::ceil_div(params.seqlen_q * (!PackGQA ? 1 : params.h / params.h_k), kBlockM) % 2 == 0, Use_cluster, [&] {
-                                // NVFP4
-                                static constexpr int ClusterM = (Enable_cluster && !KV_IS_NVFP4 && Use_cluster) ? 2 : 1;
                                 int const qhead_per_khead = !PackGQA ? 1 : cutlass::ceil_div(params.h, params.h_k);
                                 PACK_GQA_BLOCK_SWITCH(qhead_per_khead, kBlockH_, [&] {
-                                    // TODO: look at pack gqa tma for hdim diff
-                                    static constexpr int kBlockH = !PackGQA || Arch < 90 || (kHeadDim != kHeadDimV) ? 1 : kBlockH_;
+                                  static constexpr int kBlockH = !PackGQA || Arch < 90 || (kHeadDim != kHeadDimV) ? 1 : kBlockH_;
+
+                                  if constexpr (AppendKV) {
+                                    // NVFP4 + AppendKV is unsupported: KV_IS_NVFP4 = false.
+                                    // Compute ClusterM here where its dependencies are known.
+                                    static constexpr int ClusterM = (Enable_cluster && Use_cluster) ? 2 : 1;
+                                    run_flash_fwd<
+                                      Arch, kHeadDim, kHeadDimV, ClusterM, T, T_out,
+                                      Is_causal, Is_local, Has_softcap, Varlen,
+                                      PagedKVNonTMA, /*AppendKV*/ true, HasQv,
+                                      PackGQA, Split, V_colmajor, Use_one_mma_wg, kBlockH, /*KV_IS_NVFP4*/ false
+                                    >(params, stream);
+                                  } else {
                                     BOOL_SWITCH(params.kv_is_nvfp4, KV_IS_NVFP4, [&] {
-                                        run_flash_fwd<
-                                            Arch, kHeadDim, kHeadDimV, ClusterM, T, T_out,
-                                            Is_causal, Is_local, Has_softcap, Varlen,
-                                            PagedKVNonTMA, (AppendKV && Varlen), HasQv,
-                                            PackGQA, Split, V_colmajor, Use_one_mma_wg, kBlockH, KV_IS_NVFP4
-                                        >(params, stream);
+                                      static constexpr int ClusterM = (Enable_cluster && !KV_IS_NVFP4 && Use_cluster) ? 2 : 1;
+                                      run_flash_fwd<
+                                        Arch, kHeadDim, kHeadDimV, ClusterM, T, T_out,
+                                        Is_causal, Is_local, Has_softcap, Varlen,
+                                        PagedKVNonTMA, /*AppendKV*/ false, HasQv,
+                                        PackGQA, Split, V_colmajor, Use_one_mma_wg, kBlockH, KV_IS_NVFP4
+                                      >(params, stream);
                                     });
+                                  }
                                 });
                             });
                         });

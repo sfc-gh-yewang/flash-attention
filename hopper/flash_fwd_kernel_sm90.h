@@ -52,7 +52,7 @@ public:
                   "NVFP4 path must use the non-TMA producer (Use_TMA_KV == false).");
     static_assert(!(KV_IS_NVFP4 && AppendKV),
                   "AppendKV with NVFP4 is not implemented (no fp16/bf16->nvfp4 store).");
-    static_assert(!KV_IS_NVFP4 || CUTE_STATIC_V(size(ClusterShape{})) == 1,
+    static_assert(!KV_IS_NVFP4 || CUTE_STATIC_V(size(typename CollectiveMainloop::ClusterShape{})) == 1,
                   "NVFP4 non-TMA path requires ClusterShape == 1.");
 
     static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
