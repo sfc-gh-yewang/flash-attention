@@ -18,7 +18,9 @@
 #include "tile_scheduler.hpp"
 #include "flash_fwd_kernel_sm90.h"
 #include "flash_fwd_kernel_sm80.h"
+#pragma diag_suppress 3357
 #include "mainloop_fwd_sm90_tma_gmma_ws.hpp"
+#pragma diag_default 3357
 #include "mainloop_fwd_sm80.hpp"
 #include "epilogue_fwd.hpp"
 #include "heuristics.h"
